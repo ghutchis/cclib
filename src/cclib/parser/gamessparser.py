@@ -71,7 +71,7 @@ class GAMESS(logfileparser.Logfile):
 
     def extract(self, inputfile, line):
         """Extract information from the file object inputfile."""
-
+        
         if line[1:12] == "INPUT CARD>":
             return
 
@@ -547,7 +547,11 @@ class GAMESS(logfileparser.Logfile):
                     pass
                 else:
                     values.append([float(line.split()[self.scf_valcol])])
-                line = next(inputfile)
+                try:
+                    line = next(inputfile)
+                except StopIteration:
+                    self.logger.warning('File terminated before end of last SCF!')
+                    break
             self.scfvalues.append(values)
 
         # Sometimes, only the first SCF cycle has the banner parsed for above,
@@ -635,7 +639,7 @@ class GAMESS(logfileparser.Logfile):
         # PLEASE VERIFY THE PROGRAM'S DECISION MANUALLY!
         #
         if "NORMAL COORDINATE ANALYSIS IN THE HARMONIC APPROXIMATION" in line:
-
+            
             self.vibfreqs = []
             self.vibirs = []
             self.vibdisps = []
@@ -645,8 +649,26 @@ class GAMESS(logfileparser.Logfile):
             # Pass the warnings to the logger if they are there.
             while not "MODES" in line:
                 self.updateprogress(inputfile, "Frequency Information")
-
+                
                 line = next(inputfile)
+                
+                # Typical Atomic Masses section printed in GAMESS
+                #               ATOMIC WEIGHTS (AMU)
+                #
+                # 1     O                15.99491
+                # 2     H                 1.00782
+                # 3     H                 1.00782
+                if "ATOMIC WEIGHTS" in line:
+                    atommasses = []
+                    self.skip_line(inputfile,['b'])
+                    # There is a blank line after ATOMIC WEIGHTS
+                    line = next(inputfile)
+                    while line.strip():
+                        temp = line.strip().split()
+                        atommasses.append(float(temp[2]))
+                        line = next(inputfile)
+                    self.set_attribute('atommasses', atommasses)
+
                 if "THIS IS NOT A STATIONARY POINT" in line:
                     msg = "\n   This is not a stationary point on the molecular PES"
                     msg += "\n   The vibrational analysis is not valid!!!"
@@ -863,7 +885,6 @@ class GAMESS(logfileparser.Logfile):
             self.skip_line(inputfile, 'dashes')
 
             for base in range(0, self.nmo, 5):
-
                 self.updateprogress(inputfile, "Coefficients")
 
                 line = next(inputfile)
@@ -875,9 +896,25 @@ class GAMESS(logfileparser.Logfile):
 
                 numbers = next(inputfile)  # Eigenvector numbers.
 
+                # This is for regression CdtetraM1B3LYP.
+                if "ALPHA SET" in numbers:
+                    blank = next(inputfile)
+                    numbers = next(inputfile)
+
+                # If not all coefficients are printed, the logfile will go right to
+                # the beta section if there is one, so break out in that case.
+                if "BETA SET" in numbers:
+                    line = numbers
+                    break
+
                 # Sometimes there are some blank lines here.
                 while not line.strip():
                     line = next(inputfile)
+
+                # Geometry optimizations don't have END OF RHF/DFT
+                # CALCULATION, they head right into the next section.
+                if "--------" in line:
+                    break
 
                 # Eigenvalues for these orbitals (in hartrees).
                 try:
@@ -941,12 +978,9 @@ class GAMESS(logfileparser.Logfile):
 
                     coeffs = line[15:]  # Strip off the crud at the start.
                     j = 0
-
                     while j*11+4 < len(coeffs):
                         self.mocoeffs[0][base+j, i] = float(coeffs[j * 11:(j + 1) * 11])
                         j += 1
-
-            line = next(inputfile)
 
             # If it's a restricted calc and no more properties, we have:
             #
@@ -966,7 +1000,9 @@ class GAMESS(logfileparser.Logfile):
             #                      1          2          3          4          5
             # ...
             #
-            line = next(inputfile)
+            if "BETA SET" not in line:
+                line = next(inputfile)
+                line = next(inputfile)
 
             # This can come in between the alpha and beta orbitals (see #130).
             if line.strip() == "LZ VALUE ANALYSIS FOR THE MOS":
@@ -974,18 +1010,27 @@ class GAMESS(logfileparser.Logfile):
                     line = next(inputfile)
                 line = next(inputfile)
 
-            if line[2:22] == "----- BETA SET -----":
+            # Covers label with both dashes and stars (like regression CdtetraM1B3LYP).
+            if "BETA SET" in line:
                 self.mocoeffs.append(numpy.zeros((self.nmo, self.nbasis), "d"))
                 self.moenergies.append([])
                 self.mosyms.append([])
-                for i in range(4):
+                blank = next(inputfile)
+                line = next(inputfile)
+
+                # Sometimes EIGENVECTORS is missing, so rely on dashes to signal it.
+                if set(line.strip()) == {'-'}:
+                    self.skip_lines(inputfile, ['EIGENVECTORS', 'd', 'b'])
                     line = next(inputfile)
+
                 for base in range(0, self.nmo, 5):
                     self.updateprogress(inputfile, "Coefficients")
-
-                    blank = next(inputfile)
-                    line = next(inputfile)  # Eigenvector no
+                    if base != 0:
+                        line = next(inputfile)
+                        line = next(inputfile)
                     line = next(inputfile)
+                    if "properties" in line.lower():
+                        break
                     self.moenergies[1].extend([utils.convertor(float(x), "hartree", "eV") for x in line.split()])
                     line = next(inputfile)
                     self.mosyms[1].extend(list(map(self.normalisesym, line.split())))
